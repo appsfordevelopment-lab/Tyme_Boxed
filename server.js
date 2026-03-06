@@ -42,6 +42,12 @@ app.get('/', (req, res) => {
     api: '/api/nfc/verify'
   });
 });
+app.get('/api', (req, res) => {
+  res.json({
+    status: "ok",
+    message: "Tyme Boxed API root"
+  });
+});
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -57,6 +63,7 @@ app.get('/api/ping', (req, res) => {
 // Start server
 app.listen(PORT, () => {
   console.log(`\n Tyme Boxed API Server running on port ${PORT}`);
+  console.log(`\n\ Server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
   console.log(`NFC Verify: POST http://localhost:${PORT}/api/nfc/verify (no auth required)\n`);
 });

@@ -18,7 +18,10 @@ if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
     console.error('[Twilio] Failed to initialize client:', error.message);
   }
 } else {
-  console.warn('[Twilio] Credentials not found. Phone OTP will not work. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_PHONE_NUMBER in .env');
+  console.warn('[Twilio] Credentials not found. Phone OTP will not work. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_MESSAGING_SERVICE_SID or TWILIO_PHONE_NUMBER in .env');
+}
+if (twilioClient && process.env.TWILIO_MESSAGING_SERVICE_SID) {
+  console.log('[Twilio] Messaging Service enabled:', process.env.TWILIO_MESSAGING_SERVICE_SID);
 }
 
 // Generate 6-digit OTP
@@ -50,8 +53,15 @@ router.post('/send-otp', async (req, res) => {
       });
     }
 
-    const identifier = email || phone;
     const type = email ? 'email' : 'phone';
+    let identifier = email || phone;
+
+    // For phone: normalize to E.164 and use for both Twilio and OTP identifier
+    if (type === 'phone' && phone) {
+      const digits = phone.replace(/\D/g, '');
+      const e164 = digits ? `+${digits}` : phone;
+      identifier = e164;
+    }
 
     // Rate limiting
     const canSend = await checkRateLimit(identifier, type);
@@ -83,26 +93,52 @@ router.post('/send-otp', async (req, res) => {
         });
       }
 
-      if (!process.env.TWILIO_PHONE_NUMBER) {
+      const messagingServiceSid = process.env.TWILIO_MESSAGING_SERVICE_SID;
+      const fromNumber = process.env.TWILIO_PHONE_NUMBER;
+
+      if (!messagingServiceSid && !fromNumber) {
         return res.status(500).json({
           success: false,
-          message: 'SMS service is not configured. Please contact support.'
+          message: 'SMS service is not configured. Set TWILIO_MESSAGING_SERVICE_SID or TWILIO_PHONE_NUMBER in .env'
         });
       }
 
       try {
-        const message = await twilioClient.messages.create({
+        // Use Messaging Service (picks best sender per destination) or fallback to single number
+        const messageParams = {
           body: `Your Time Boxed verification code is: ${otpCode}. This code expires in 5 minutes.`,
-          from: process.env.TWILIO_PHONE_NUMBER,
-          to: phone
-        });
+          to: identifier
+        };
+        if (messagingServiceSid) {
+          messageParams.messagingServiceSid = messagingServiceSid;
+        } else {
+          messageParams.from = fromNumber;
+        }
 
-        console.log(`[OTP] SMS sent to ${phone}, SID: ${message.sid}`);
+        const message = await twilioClient.messages.create(messageParams);
+
+        console.log(`[OTP] SMS sent to ${identifier}, SID: ${message.sid}`);
       } catch (twilioError) {
         console.error('[OTP] Twilio error:', twilioError);
+        const code = twilioError?.code;
+        const twilioMsg = twilioError?.message || '';
+        let userMessage = 'Failed to send OTP. Please check your phone number and try again.';
+        if (code === 21612 || (twilioMsg.includes('To') && twilioMsg.includes('From'))) {
+          userMessage =
+            'SMS cannot be sent to this country with the current setup. Please try with an Indian number (+91) or contact support.';
+        } else if (code === 21408 || twilioMsg.includes('region') || twilioMsg.includes('permission')) {
+          userMessage =
+            'SMS is not enabled for this country. Please try with an Indian number (+91) or contact support.';
+        } else if (code === 21211 || twilioMsg.includes('invalid')) {
+          userMessage = 'Invalid phone number. Please check the number and country code.';
+        } else if (code === 30004 || twilioMsg.includes('blocked')) {
+          userMessage = 'SMS delivery is blocked for this number. Please try another number.';
+        } else if (twilioMsg) {
+          userMessage = twilioMsg;
+        }
         return res.status(500).json({
           success: false,
-          message: 'Failed to send OTP. Please check your phone number and try again.'
+          message: userMessage
         });
       }
     } else {
@@ -145,8 +181,13 @@ router.post('/verify-otp', async (req, res) => {
       });
     }
 
-    const identifier = email || phone;
     const type = email ? 'email' : 'phone';
+    let identifier = email || phone;
+    // Normalize phone to E.164 to match send-otp identifier
+    if (type === 'phone' && phone) {
+      const digits = phone.replace(/\D/g, '');
+      identifier = digits ? `+${digits}` : phone;
+    }
 
     // Find the most recent unverified OTP for this identifier
     const otpRecord = await OTP.findOne({
