@@ -1,7 +1,13 @@
 const express = require('express');
 const twilio = require('twilio');
+const { OAuth2Client } = require('google-auth-library');
 const OTP = require('../models/OTP');
+const User = require('../models/User');
 const crypto = require('crypto');
+
+// Google Client ID - supports both env var names
+const googleClientId =
+  process.env.GOOGLE_CLIENT_ID || process.env.Google_Client_ID;
 
 const router = express.Router();
 
@@ -260,19 +266,159 @@ router.post('/verify-otp', async (req, res) => {
       await otpRecord.save();
     }
 
-    // Generate a simple token (you can use JWT here if needed)
+    const provider = type === 'phone' ? 'phone' : 'email'; // email OTP
+    const identifierField = type === 'phone' ? 'phone' : 'email';
+
+    // Find or create user and sync login providers
+    let user = await User.findOne({ [identifierField]: identifier });
+    if (user) {
+      if (!user.loginProviders.includes(provider)) {
+        user.loginProviders.push(provider);
+        await user.save();
+      }
+    } else {
+      user = await User.create({
+        [identifierField]: identifier,
+        name: '',
+        loginProviders: [provider]
+      });
+    }
+
     const token = crypto.randomBytes(32).toString('hex');
 
     res.json({
       success: true,
       message: 'OTP verified successfully',
-      token
+      token,
+      user: {
+        id: user._id,
+        name: user.name || '',
+        phone: user.phone || '',
+        email: user.email || '',
+        loginProviders: user.loginProviders
+      }
     });
   } catch (error) {
     console.error('[OTP] Verify error:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to verify OTP. Please try again.'
+    });
+  }
+});
+
+// POST /api/auth/google - Sign in / sign up with Google ID token
+// Client sends { idToken: "..." } from Google Sign-In
+router.post('/google', async (req, res) => {
+  try {
+    const { idToken } = req.body;
+
+    if (!idToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Google ID token is required'
+      });
+    }
+
+    if (!googleClientId) {
+      return res.status(500).json({
+        success: false,
+        message:
+          'Google Sign-In is not configured. Set GOOGLE_CLIENT_ID or Google_Client_ID in .env'
+      });
+    }
+
+    const client = new OAuth2Client(googleClientId);
+    let payload;
+    try {
+      const ticket = await client.verifyIdToken({
+        idToken,
+        audience: googleClientId
+      });
+      payload = ticket.getPayload();
+    } catch (verifyError) {
+      console.error('[Auth] Google token verification failed:', verifyError?.message);
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired Google token. Please sign in again.'
+      });
+    }
+
+    const googleId = payload.sub;
+    const email = payload.email || null;
+    const name = payload.name || payload.given_name || '';
+
+    // Account linking: same user on phone (mobile) and Google (Mac)
+    // 1. Find by googleId (already linked)
+    // 2. Find by email (link - user previously signed up with phone/email)
+    let user = await User.findOne({ googleId });
+    if (!user && email) {
+      user = await User.findOne({ email });
+      if (user) {
+        user.googleId = googleId;
+        if (!user.loginProviders.includes('google')) {
+          user.loginProviders.push('google');
+        }
+        if (name && !user.name) user.name = name;
+        await user.save();
+      }
+    }
+    if (!user) {
+      user = await User.create({
+        googleId,
+        email: email || undefined,
+        name,
+        loginProviders: ['google']
+      });
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+
+    res.json({
+      success: true,
+      message: 'Signed in with Google successfully',
+      token,
+      user: {
+        id: user._id,
+        name: user.name || '',
+        phone: user.phone || '',
+        email: user.email || '',
+        loginProviders: user.loginProviders
+      }
+    });
+  } catch (error) {
+    console.error('[Auth] Google login error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to sign in with Google. Please try again.'
+    });
+  }
+});
+
+// POST /api/auth/apple - Sign in / sign up with Apple (placeholder)
+// TODO: Implement Apple Sign-In when iOS sends identityToken
+router.post('/apple', async (req, res) => {
+  try {
+    const { identityToken, authorizationCode, user: appleUser } = req.body;
+
+    if (!identityToken) {
+      return res.status(400).json({
+        success: false,
+        message:
+          'Apple identity token is required. Integrate Sign in with Apple on the client first.'
+      });
+    }
+
+    return res.status(501).json({
+      success: false,
+      message:
+        'Apple Sign-In is not yet implemented on the backend. Use phone or Google for now.'
+    });
+  } catch (error) {
+    console.error('[Auth] Apple login error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to sign in with Apple. Please try again.'
     });
   }
 });
