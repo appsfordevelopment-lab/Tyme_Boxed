@@ -1,6 +1,7 @@
 const express = require('express');
 const twilio = require('twilio');
 const { OAuth2Client } = require('google-auth-library');
+const verifyAppleToken = require('verify-apple-id-token').default;
 const OTP = require('../models/OTP');
 const User = require('../models/User');
 const crypto = require('crypto');
@@ -8,6 +9,10 @@ const crypto = require('crypto');
 // Google Client ID - supports both env var names
 const googleClientId =
   process.env.GOOGLE_CLIENT_ID || process.env.Google_Client_ID;
+
+// Apple Sign In: clientId is the app's bundle ID (e.g. com.tymeboxed.app)
+const appleClientId =
+  process.env.APPLE_CLIENT_ID || process.env.APPLE_BUNDLE_ID || 'com.tymeboxed.app';
 
 const router = express.Router();
 
@@ -395,11 +400,10 @@ router.post('/google', async (req, res) => {
   }
 });
 
-// POST /api/auth/apple - Sign in / sign up with Apple (placeholder)
-// TODO: Implement Apple Sign-In when iOS sends identityToken
+// POST /api/auth/apple - Sign in / sign up with Apple
 router.post('/apple', async (req, res) => {
   try {
-    const { identityToken, authorizationCode, user: appleUser } = req.body;
+    const { identityToken, name, email } = req.body;
 
     if (!identityToken) {
       return res.status(400).json({
@@ -409,10 +413,59 @@ router.post('/apple', async (req, res) => {
       });
     }
 
-    return res.status(501).json({
-      success: false,
-      message:
-        'Apple Sign-In is not yet implemented on the backend. Use phone or Google for now.'
+    let payload;
+    try {
+      payload = await verifyAppleToken({
+        idToken: identityToken,
+        clientId: appleClientId
+      });
+    } catch (verifyError) {
+      console.error('[Auth] Apple token verification failed:', verifyError?.message);
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired Apple token. Please sign in again.'
+      });
+    }
+
+    const appleId = payload.sub;
+    const verifiedEmail = payload.email || email || null;
+
+    // Find or create user and link Apple ID
+    let user = await User.findOne({ appleId });
+    if (!user && verifiedEmail) {
+      user = await User.findOne({ email: verifiedEmail });
+      if (user) {
+        user.appleId = appleId;
+        if (!user.loginProviders.includes('apple')) {
+          user.loginProviders.push('apple');
+        }
+        if (name && !user.name) user.name = name;
+        if (verifiedEmail && !user.email) user.email = verifiedEmail;
+        await user.save();
+      }
+    }
+    if (!user) {
+      user = await User.create({
+        appleId,
+        email: verifiedEmail || undefined,
+        name: name || '',
+        loginProviders: ['apple']
+      });
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+
+    res.json({
+      success: true,
+      message: 'Signed in with Apple successfully',
+      token,
+      user: {
+        id: user._id,
+        name: user.name || '',
+        phone: user.phone || '',
+        email: user.email || '',
+        loginProviders: user.loginProviders
+      }
     });
   } catch (error) {
     console.error('[Auth] Apple login error:', error);
