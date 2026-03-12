@@ -4,6 +4,7 @@ const { OAuth2Client } = require('google-auth-library');
 const verifyAppleToken = require('verify-apple-id-token').default;
 const OTP = require('../models/OTP');
 const User = require('../models/User');
+const AuthToken = require('../models/AuthToken');
 const crypto = require('crypto');
 
 // Google Client ID - supports both env var names
@@ -34,10 +35,10 @@ if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
   console.warn('[Twilio] Credentials not found. Phone OTP will not work. Set TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN in .env');
 }
 if (twilioClient && verifyServiceSid) {
-  console.log('[Twilio] Verify Service enabled:', verifyServiceSid);
+  console.log('[Twilio] Verify Service enabled (SMS + email):', verifyServiceSid);
 }
 
-// Generate 6-digit OTP
+// Generate 6-digit OTP (used only when not using Twilio Verify)
 function generateOTP() {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
@@ -148,18 +149,57 @@ router.post('/send-otp', async (req, res) => {
         });
       }
     } else {
-      // Email OTP: generate and store ourselves
-      const otpCode = generateOTP();
-      const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-      await OTP.create({
-        identifier,
-        otp: otpCode,
-        type,
-        expiresAt
-      });
-      // Email OTP - implement email service here if needed
-      // For now, just log it
-      console.log(`[OTP] Email OTP for ${email}: ${otpCode}`);
+      // Email OTP: send via Twilio Verify (channel: email)
+      // Requires Email Integration in Twilio Console: https://www.twilio.com/console/verify/email
+      if (!twilioClient || !verifyServiceSid) {
+        return res.status(500).json({
+          success: false,
+          message:
+            'Email service is not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_VERIFY_SERVICE_SID in .env and configure Email Integration at twilio.com/console/verify/email'
+        });
+      }
+
+      try {
+        const verification = await twilioClient.verify.v2
+          .services(verifyServiceSid)
+          .verifications.create({
+            to: identifier,
+            channel: 'email'
+          });
+
+        // Create OTP record for rate limiting only (Verify handles the actual code)
+        const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+        await OTP.create({
+          identifier,
+          otp: 'verify',
+          type,
+          expiresAt
+        });
+
+        console.log(`[OTP] Verify email sent to ${identifier}, SID: ${verification.sid}`);
+      } catch (twilioError) {
+        console.error(
+          '[OTP] Twilio Verify email error:',
+          JSON.stringify({
+            code: twilioError?.code,
+            status: twilioError?.status,
+            message: twilioError?.message
+          })
+        );
+        let userMessage =
+          twilioError?.message || 'Failed to send verification email. Please try again.';
+        if (
+          twilioError?.message?.toLowerCase().includes('email integration') ||
+          twilioError?.code === 60200
+        ) {
+          userMessage =
+            'Email verification is not configured. Set up Email Integration at twilio.com/console/verify/email (requires SendGrid).';
+        }
+        return res.status(500).json({
+          success: false,
+          message: userMessage
+        });
+      }
     }
 
     res.json({
@@ -204,74 +244,38 @@ router.post('/verify-otp', async (req, res) => {
       identifier = digits ? `+${digits}` : phone;
     }
 
-    if (type === 'phone') {
-      // Phone: verify via Twilio Verify API
-      if (!twilioClient || !verifyServiceSid) {
-        return res.status(500).json({
-          success: false,
-          message: 'SMS service is not configured. Please contact support.'
-        });
-      }
-
-      try {
-        const verificationCheck = await twilioClient.verify.v2
-          .services(verifyServiceSid)
-          .verificationChecks.create({
-            to: identifier,
-            code: otp
-          });
-
-        if (verificationCheck.status !== 'approved') {
-          return res.status(400).json({
-            success: false,
-            message: 'Invalid or expired OTP. Please request a new one.'
-          });
-        }
-      } catch (twilioError) {
-        console.error('[OTP] Twilio Verify check error:', twilioError?.message);
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid or expired OTP. Please request a new one.'
-        });
-      }
-    } else {
-      // Email: verify against our DB
-      const otpRecord = await OTP.findOne({
-        identifier,
-        type,
-        verified: false,
-        expiresAt: { $gt: new Date() }
-      }).sort({ createdAt: -1 });
-
-      if (!otpRecord) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid or expired OTP. Please request a new one.'
-        });
-      }
-
-      if (otpRecord.attempts >= 5) {
-        return res.status(400).json({
-          success: false,
-          message: 'Too many failed attempts. Please request a new OTP.'
-        });
-      }
-
-      if (otpRecord.otp !== otp) {
-        otpRecord.attempts += 1;
-        await otpRecord.save();
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid OTP. Please try again.'
-        });
-      }
-
-      otpRecord.verified = true;
-      otpRecord.verifiedAt = new Date();
-      await otpRecord.save();
+    // Both phone and email: verify via Twilio Verify API
+    if (!twilioClient || !verifyServiceSid) {
+      return res.status(500).json({
+        success: false,
+        message:
+          'Verification service is not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_VERIFY_SERVICE_SID in .env. For email OTP, also configure Email Integration at twilio.com/console/verify/email'
+      });
     }
 
-    const provider = type === 'phone' ? 'phone' : 'email'; // email OTP
+    try {
+      const verificationCheck = await twilioClient.verify.v2
+        .services(verifyServiceSid)
+        .verificationChecks.create({
+          to: identifier,
+          code: otp
+        });
+
+      if (verificationCheck.status !== 'approved') {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid or expired OTP. Please request a new one.'
+        });
+      }
+    } catch (twilioError) {
+      console.error('[OTP] Twilio Verify check error:', twilioError?.message);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired OTP. Please try again.'
+      });
+    }
+
+    const provider = type === 'phone' ? 'phone' : 'email';
     const identifierField = type === 'phone' ? 'phone' : 'email';
 
     // Find or create user and sync login providers
@@ -290,6 +294,7 @@ router.post('/verify-otp', async (req, res) => {
     }
 
     const token = crypto.randomBytes(32).toString('hex');
+    await AuthToken.create({ token, userId: user._id });
 
     res.json({
       success: true,
@@ -378,6 +383,7 @@ router.post('/google', async (req, res) => {
     }
 
     const token = crypto.randomBytes(32).toString('hex');
+    await AuthToken.create({ token, userId: user._id });
 
     res.json({
       success: true,
@@ -454,6 +460,7 @@ router.post('/apple', async (req, res) => {
     }
 
     const token = crypto.randomBytes(32).toString('hex');
+    await AuthToken.create({ token, userId: user._id });
 
     res.json({
       success: true,
@@ -472,6 +479,50 @@ router.post('/apple', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to sign in with Apple. Please try again.'
+    });
+  }
+});
+
+// POST /api/auth/delete-account - Permanently delete user account (requires Bearer token)
+router.post('/delete-account', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authorization token required. Please sign in again.'
+      });
+    }
+
+    const token = authHeader.replace('Bearer ', '').trim();
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid authorization token.'
+      });
+    }
+
+    const authToken = await AuthToken.findOne({ token });
+    if (!authToken) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired token. Please sign in again.'
+      });
+    }
+
+    const userId = authToken.userId;
+    await AuthToken.deleteMany({ userId });
+    await User.findByIdAndDelete(userId);
+
+    res.json({
+      success: true,
+      message: 'Account deleted successfully.'
+    });
+  } catch (error) {
+    console.error('[Auth] Delete account error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete account. Please try again.'
     });
   }
 });

@@ -1,6 +1,6 @@
 # Time Boxed Authentication Backend
 
-Node.js backend API for sending OTP emails via Gmail and verifying OTP codes.
+Node.js backend API for sending OTP emails and verifying OTP codes.
 
 ## Setup Instructions
 
@@ -10,37 +10,32 @@ Node.js backend API for sending OTP emails via Gmail and verifying OTP codes.
 npm install
 ```
 
-### 2. Configure Gmail App Password
+### 2. Configure Twilio Verify (SMS + Email OTP)
 
-1. Go to your Google Account: https://myaccount.google.com/
-2. Enable **2-Step Verification** if not already enabled
-3. Go to **App Passwords**: https://myaccount.google.com/apppasswords
-4. Select **Mail** and **Other (Custom name)**
-5. Enter "Time Boxed Backend" as the name
-6. Click **Generate**
-7. Copy the 16-digit app password (no spaces)
+Both phone and email OTP use [Twilio Verify](https://www.twilio.com/docs/verify). Use your existing Twilio account:
+
+**SMS (phone) OTP:** Works with `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_VERIFY_SERVICE_SID`.
+
+**Email OTP:** Requires an additional Email Integration in Twilio Console:
+1. Go to [twilio.com/console/verify/email](https://www.twilio.com/console/verify/email)
+2. Create an email integration (requires [SendGrid](https://sendgrid.com) account + API key + Dynamic Template with `{{twilio_code}}`)
+3. Connect the integration to your Verify service
+
+See [Twilio Verify Email setup](https://www.twilio.com/docs/verify/email) for full instructions.
 
 ### 3. Create .env File
 
-Copy `.env.example` to `.env`:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and add your Gmail credentials:
+Create a `.env` file in the backend root and add:
 
 ```env
-GMAIL_USER=your-email@gmail.com
-GMAIL_APP_PASSWORD=your-16-digit-app-password
 PORT=3000
 
-# Twilio Configuration (for phone OTP - optional)
+# Twilio Verify (required for both SMS and email OTP)
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_AUTH_TOKEN=your_auth_token_here
-TWILIO_PHONE_NUMBER=+1234567890
+TWILIO_VERIFY_SERVICE_SID=VAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
-# MongoDB (required for NFC and JWT user persistence)
+# MongoDB (required for NFC and user persistence)
 MONGO_URI=mongodb://localhost:27017/timeboxed
 
 # JWT secret (required when using MongoDB; use a long random string in production)
@@ -51,10 +46,8 @@ ADMIN_SECRET=your-admin-secret-here
 ```
 
 **Important:** 
-- Use your Gmail address (the one you'll send emails from)
-- Use the **App Password** (16 digits, no spaces), NOT your regular Gmail password
-- Twilio credentials are optional - phone OTP will work only if configured
-- See `TWILIO_SETUP.md` for Twilio setup instructions
+- Twilio credentials are **required** for OTP (both phone and email)
+- For email OTP, you must also configure the Email Integration in Twilio Console (SendGrid + template)
 - Never commit the `.env` file to git
 
 ### 4. Start the Server
@@ -136,7 +129,7 @@ Verifies the OTP code.
 
 ## Features
 
-- ✅ Sends OTP via Gmail
+- ✅ Sends OTP via Twilio Verify (SMS and email)
 - ✅ 6-digit OTP generation
 - ✅ 5-minute expiration
 - ✅ Rate limiting (3 requests per email per hour)
