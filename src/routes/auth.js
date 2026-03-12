@@ -511,7 +511,8 @@ router.post('/delete-account', async (req, res) => {
     }
 
     const userId = authToken.userId;
-    await AuthToken.deleteMany({ userId });
+    await authToken.deleteOne();
+    await AuthToken.deleteMany({ userId: userId });
     await User.findByIdAndDelete(userId);
 
     res.json({
