@@ -184,7 +184,7 @@ router.post('/send-otp', async (req, res) => {
         await resendClient.emails.send({
           from: fromAddress,
           to: [identifier],
-          subject: 'Your TymeBoxed verification code',
+          subject: 'Your Tyme Boxed verification code',
           html: `
           <p>Your verification code is:</p>
           <p style="font-size: 28px; font-weight: bold; letter-spacing: 4px; margin: 16px 0;">${otpCode}</p>
