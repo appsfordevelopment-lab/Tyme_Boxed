@@ -19,7 +19,8 @@
     "express": "^4.22.1",
     "google-auth-library": "^9.14.0",
     "mongoose": "^9.1.5",
-    "twilio": "^5.12.1",
+    "resend": "^6.9.3",
+    "twilio": "^5.13.0",
     "verify-apple-id-token": "^3.1.2"
   },
   "devDependencies": {

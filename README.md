@@ -10,18 +10,11 @@ Node.js backend API for sending OTP emails and verifying OTP codes.
 npm install
 ```
 
-### 2. Configure Twilio Verify (SMS + Email OTP)
+### 2. Configure OTP
 
-Both phone and email OTP use [Twilio Verify](https://www.twilio.com/docs/verify). Use your existing Twilio account:
+**Phone (SMS) OTP:** Uses [Twilio Verify](https://www.twilio.com/docs/verify). Set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_VERIFY_SERVICE_SID`.
 
-**SMS (phone) OTP:** Works with `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_VERIFY_SERVICE_SID`.
-
-**Email OTP:** Requires an additional Email Integration in Twilio Console:
-1. Go to [twilio.com/console/verify/email](https://www.twilio.com/console/verify/email)
-2. Create an email integration (requires [SendGrid](https://sendgrid.com) account + API key + Dynamic Template with `{{twilio_code}}`)
-3. Connect the integration to your Verify service
-
-See [Twilio Verify Email setup](https://www.twilio.com/docs/verify/email) for full instructions.
+**Email OTP:** Uses [Resend](https://resend.com). Sign up at resend.com, create an API key, add `RESEND_API_KEY` to .env.
 
 ### 3. Create .env File
 
@@ -30,10 +23,13 @@ Create a `.env` file in the backend root and add:
 ```env
 PORT=3000
 
-# Twilio Verify (required for both SMS and email OTP)
+# Twilio Verify (for phone/SMS OTP)
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_AUTH_TOKEN=your_auth_token_here
 TWILIO_VERIFY_SERVICE_SID=VAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Resend (for email OTP)
+RESEND_API_KEY=re_your_api_key_here
 
 # MongoDB (required for NFC and user persistence)
 MONGO_URI=mongodb://localhost:27017/timeboxed
@@ -46,8 +42,7 @@ ADMIN_SECRET=your-admin-secret-here
 ```
 
 **Important:** 
-- Twilio credentials are **required** for OTP (both phone and email)
-- For email OTP, you must also configure the Email Integration in Twilio Console (SendGrid + template)
+- Twilio: required for phone OTP. Resend: required for email OTP
 - Never commit the `.env` file to git
 
 ### 4. Start the Server
@@ -129,7 +124,7 @@ Verifies the OTP code.
 
 ## Features
 
-- ✅ Sends OTP via Twilio Verify (SMS and email)
+- ✅ Sends OTP via Twilio (SMS) and Resend (email)
 - ✅ 6-digit OTP generation
 - ✅ 5-minute expiration
 - ✅ Rate limiting (3 requests per email per hour)

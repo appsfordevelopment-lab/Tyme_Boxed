@@ -1,4 +1,5 @@
 const express = require('express');
+const { Resend } = require('resend');
 const twilio = require('twilio');
 const { OAuth2Client } = require('google-auth-library');
 const verifyAppleToken = require('verify-apple-id-token').default;
@@ -35,10 +36,20 @@ if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
   console.warn('[Twilio] Credentials not found. Phone OTP will not work. Set TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN in .env');
 }
 if (twilioClient && verifyServiceSid) {
-  console.log('[Twilio] Verify Service enabled (SMS + email):', verifyServiceSid);
+  console.log('[Twilio] Verify Service enabled (SMS):', verifyServiceSid);
 }
 
-// Generate 6-digit OTP (used only when not using Twilio Verify)
+// Resend for email OTP (RESEND_API_KEY in .env)
+const resendApiKey = process.env.RESEND_API_KEY;
+let resendClient = null;
+if (resendApiKey) {
+  resendClient = new Resend(resendApiKey);
+  console.log('[Resend] Email client initialized');
+} else {
+  console.warn('[Resend] RESEND_API_KEY not set. Email OTP will not work.');
+}
+
+// Generate 6-digit OTP for email (Resend sends it; phone uses Twilio Verify)
 function generateOTP() {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
@@ -149,57 +160,48 @@ router.post('/send-otp', async (req, res) => {
         });
       }
     } else {
-      // Email OTP: send via Twilio Verify (channel: email)
-      // Requires Email Integration in Twilio Console: https://www.twilio.com/console/verify/email
-      if (!twilioClient || !verifyServiceSid) {
+      // Email OTP: generate, store, and send via Resend
+      if (!resendClient) {
         return res.status(500).json({
           success: false,
           message:
-            'Email service is not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_VERIFY_SERVICE_SID in .env and configure Email Integration at twilio.com/console/verify/email'
+            'Email service is not configured. Set RESEND_API_KEY in .env. Sign up at resend.com for a free API key.'
         });
       }
 
-      try {
-        const verification = await twilioClient.verify.v2
-          .services(verifyServiceSid)
-          .verifications.create({
-            to: identifier,
-            channel: 'email'
-          });
+      const otpCode = generateOTP();
+      const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+      await OTP.create({
+        identifier,
+        otp: otpCode,
+        type,
+        expiresAt
+      });
 
-        // Create OTP record for rate limiting only (Verify handles the actual code)
-        const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-        await OTP.create({
-          identifier,
-          otp: 'verify',
-          type,
-          expiresAt
+      const fromAddress =
+        process.env.EMAIL_FROM || 'TymeBoxed <onboarding@resend.dev>';
+      const { data: sendData, error: sendError } =
+        await resendClient.emails.send({
+          from: fromAddress,
+          to: [identifier],
+          subject: 'Your TymeBoxed verification code',
+          html: `
+          <p>Your verification code is:</p>
+          <p style="font-size: 28px; font-weight: bold; letter-spacing: 4px; margin: 16px 0;">${otpCode}</p>
+          <p>This code expires in 5 minutes. If you didn't request this, you can ignore this email.</p>
+        `
         });
 
-        console.log(`[OTP] Verify email sent to ${identifier}, SID: ${verification.sid}`);
-      } catch (twilioError) {
-        console.error(
-          '[OTP] Twilio Verify email error:',
-          JSON.stringify({
-            code: twilioError?.code,
-            status: twilioError?.status,
-            message: twilioError?.message
-          })
-        );
-        let userMessage =
-          twilioError?.message || 'Failed to send verification email. Please try again.';
-        if (
-          twilioError?.message?.toLowerCase().includes('email integration') ||
-          twilioError?.code === 60200
-        ) {
-          userMessage =
-            'Email verification is not configured. Set up Email Integration at twilio.com/console/verify/email (requires SendGrid).';
-        }
+      if (sendError) {
+        console.error('[OTP] Resend error:', sendError);
         return res.status(500).json({
           success: false,
-          message: userMessage
+          message:
+            sendError.message || 'Failed to send verification email. Please try again.'
         });
       }
+
+      console.log(`[OTP] Email sent to ${identifier}, Resend ID: ${sendData?.id}`);
     }
 
     res.json({
@@ -244,35 +246,72 @@ router.post('/verify-otp', async (req, res) => {
       identifier = digits ? `+${digits}` : phone;
     }
 
-    // Both phone and email: verify via Twilio Verify API
-    if (!twilioClient || !verifyServiceSid) {
-      return res.status(500).json({
-        success: false,
-        message:
-          'Verification service is not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_VERIFY_SERVICE_SID in .env. For email OTP, also configure Email Integration at twilio.com/console/verify/email'
-      });
-    }
-
-    try {
-      const verificationCheck = await twilioClient.verify.v2
-        .services(verifyServiceSid)
-        .verificationChecks.create({
-          to: identifier,
-          code: otp
+    if (type === 'phone') {
+      // Phone: verify via Twilio Verify API
+      if (!twilioClient || !verifyServiceSid) {
+        return res.status(500).json({
+          success: false,
+          message:
+            'SMS verification not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_VERIFY_SERVICE_SID in .env'
         });
+      }
 
-      if (verificationCheck.status !== 'approved') {
+      try {
+        const verificationCheck = await twilioClient.verify.v2
+          .services(verifyServiceSid)
+          .verificationChecks.create({
+            to: identifier,
+            code: otp
+          });
+
+        if (verificationCheck.status !== 'approved') {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid or expired OTP. Please request a new one.'
+          });
+        }
+      } catch (twilioError) {
+        console.error('[OTP] Twilio Verify check error:', twilioError?.message);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid or expired OTP. Please try again.'
+        });
+      }
+    } else {
+      // Email: verify against our DB (Resend sends OTP, we store it)
+      const otpRecord = await OTP.findOne({
+        identifier,
+        type,
+        verified: false,
+        expiresAt: { $gt: new Date() }
+      }).sort({ createdAt: -1 });
+
+      if (!otpRecord) {
         return res.status(400).json({
           success: false,
           message: 'Invalid or expired OTP. Please request a new one.'
         });
       }
-    } catch (twilioError) {
-      console.error('[OTP] Twilio Verify check error:', twilioError?.message);
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid or expired OTP. Please try again.'
-      });
+
+      if (otpRecord.attempts >= 5) {
+        return res.status(400).json({
+          success: false,
+          message: 'Too many failed attempts. Please request a new OTP.'
+        });
+      }
+
+      if (otpRecord.otp !== otp) {
+        otpRecord.attempts += 1;
+        await otpRecord.save();
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid OTP. Please try again.'
+        });
+      }
+
+      otpRecord.verified = true;
+      otpRecord.verifiedAt = new Date();
+      await otpRecord.save();
     }
 
     const provider = type === 'phone' ? 'phone' : 'email';
