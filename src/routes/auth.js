@@ -54,6 +54,19 @@ function generateOTP() {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
 
+// Google Play review account bypass (server-side only).
+// Lets the store reviewer sign in with a fixed OTP without real email delivery.
+// Inert unless BOTH env vars are set, so the fixed OTP can never be universal.
+const reviewEmail = (process.env.GOOGLE_REVIEW_EMAIL || '').trim().toLowerCase();
+const reviewOtp = (process.env.GOOGLE_REVIEW_OTP || '').trim();
+if (reviewEmail && reviewOtp) {
+  console.log('[Auth] Google review account bypass enabled for review email');
+}
+function isReviewAccount(value) {
+  if (!reviewEmail || !reviewOtp || !value) return false;
+  return String(value).trim().toLowerCase() === reviewEmail;
+}
+
 // Rate limiting: Check if too many requests in the last hour
 async function checkRateLimit(identifier, type) {
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
@@ -80,6 +93,17 @@ router.post('/send-otp', async (req, res) => {
 
     const type = email ? 'email' : 'phone';
     let identifier = email || phone;
+
+    // Google Play review account: skip real generation/send and return the
+    // normal success response so the app navigates to the OTP screen.
+    // Does not create, overwrite, or invalidate any stored OTP.
+    if (type === 'email' && isReviewAccount(identifier)) {
+      return res.json({
+        success: true,
+        message: 'OTP sent successfully to your email',
+        expiresIn: 300 // 5 minutes in seconds
+      });
+    }
 
     // For phone: normalize to E.164 and use for both Twilio and OTP identifier
     if (type === 'phone' && phone) {
@@ -277,6 +301,18 @@ router.post('/verify-otp', async (req, res) => {
           message: 'Invalid or expired OTP. Please try again.'
         });
       }
+    } else if (isReviewAccount(identifier)) {
+      // Google Play review account: accept the fixed OTP only. Reusable and
+      // non-expiring — no OTP record is read, written, or invalidated.
+      if (otp !== reviewOtp) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid OTP. Please try again.'
+        });
+      }
+      // Valid: canonicalize the email so repeat logins map to one stable user,
+      // then fall through to the normal find-or-create-user + token logic.
+      identifier = reviewEmail;
     } else {
       // Email: verify against our DB (Resend sends OTP, we store it)
       const otpRecord = await OTP.findOne({
